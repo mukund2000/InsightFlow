@@ -1,5 +1,6 @@
 import os
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -32,6 +33,24 @@ from agents.query_agent import QueryAgent
 
 st.set_page_config(page_title="InsightFlow", page_icon=":bar_chart:", layout="wide")
 
+SAMPLE_DATASETS = {
+    "Retail analytics": {
+        "filename": "Sample - Superstore.csv",
+        "path": Path("data/Sample - Superstore.csv"),
+        "description": "Orders, customers, regions, products, sales, discounts, and profit.",
+    },
+    "Airbnb listings": {
+        "filename": "Airbnb_Open_Data.csv",
+        "path": Path("data/Airbnb_Open_Data.csv"),
+        "description": "Listings, hosts, locations, room types, prices, reviews, and availability.",
+    },
+    "Titanic passengers": {
+        "filename": "Titanic-Dataset.csv",
+        "path": Path("data/Titanic-Dataset.csv"),
+        "description": "Passenger survival, class, demographics, tickets, cabins, and fares.",
+    },
+}
+
 
 def read_upload(uploaded_file) -> pd.DataFrame:
     logger.info(f"Reading uploaded file: {uploaded_file.name}")
@@ -51,6 +70,25 @@ def read_upload(uploaded_file) -> pd.DataFrame:
     except Exception as exc:
         logger.error(f"Failed to read uploaded file: {uploaded_file.name}", exc_info=True)
         raise
+
+
+def read_sample_dataset(path: Path) -> pd.DataFrame:
+    logger.info(f"Reading sample dataset: {path}")
+    df = pd.read_csv(path, low_memory=False)
+    logger.info(f"Loaded sample dataset: {len(df)} rows, {len(df.columns)} columns")
+    return df
+
+
+def reset_dataset_state(filename: str, df: pd.DataFrame, clear_upload: bool = False) -> None:
+    upload_key = st.session_state.get("upload_key", 0)
+    st.session_state.clear()
+    st.session_state.upload_key = upload_key + 1 if clear_upload else upload_key
+    st.session_state.filename = filename
+    st.session_state.raw_df = df
+    st.session_state.history = []
+    st.session_state.messages = []
+    st.session_state.anomaly_fix_log = []
+    logger.info("Session cleared and initialized for new dataset")
 
 
 def init_agents() -> dict:
@@ -73,6 +111,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "anomaly_fix_log" not in st.session_state:
     st.session_state.anomaly_fix_log = []
+if "upload_key" not in st.session_state:
+    st.session_state.upload_key = 0
 
 
 def render_history_sidebar() -> None:
@@ -172,24 +212,37 @@ def build_anomaly_table(anomalies: list[dict]) -> pd.DataFrame:
 st.title("InsightFlow")
 st.caption("Upload a dataset, clean it with AI, ask questions in plain English, and get SQL-backed insights.")
 
-uploaded = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx", "xls"])
-if not uploaded:
+uploaded = st.file_uploader(
+    "Upload CSV or Excel",
+    type=["csv", "xlsx", "xls"],
+    key=f"uploaded_file_{st.session_state.upload_key}",
+)
+
+st.subheader("Try a Sample Dataset")
+sample_cols = st.columns(len(SAMPLE_DATASETS))
+for index, (label, sample) in enumerate(SAMPLE_DATASETS.items()):
+    with sample_cols[index]:
+        st.caption(sample["description"])
+        if st.button(label, key=f"sample_{sample['filename']}", width="stretch"):
+            reset_dataset_state(
+                sample["filename"],
+                read_sample_dataset(sample["path"]),
+                clear_upload=True,
+            )
+            st.rerun()
+
+if uploaded:
+    if st.session_state.get("filename") != uploaded.name:
+        logger.info(f"New file uploaded: {uploaded.name}")
+        reset_dataset_state(uploaded.name, read_upload(uploaded))
+
+if "raw_df" not in st.session_state:
     render_history_sidebar()
-    st.info("Upload a CSV or Excel file to begin.")
+    st.info("Upload a CSV or Excel file, or choose one of the sample datasets above.")
     st.stop()
 
-if st.session_state.get("filename") != uploaded.name:
-    logger.info(f"New file uploaded: {uploaded.name}")
-    st.session_state.clear()
-    st.session_state.filename = uploaded.name
-    st.session_state.raw_df = read_upload(uploaded)
-    st.session_state.history = []
-    st.session_state.messages = []
-    st.session_state.anomaly_fix_log = []
-    logger.info(f"Session cleared and initialized for new file")
-
 raw_df = st.session_state.raw_df
-st.success(f"Loaded {uploaded.name}: {len(raw_df):,} rows x {len(raw_df.columns):,} columns")
+st.success(f"Loaded {st.session_state.filename}: {len(raw_df):,} rows x {len(raw_df.columns):,} columns")
 
 with st.expander("Raw data preview", expanded=False):
     st.dataframe(raw_df.head(20), width="stretch")
