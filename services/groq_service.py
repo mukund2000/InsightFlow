@@ -93,6 +93,66 @@ Base ALL numbers ONLY on the provided statistics. Return ONLY valid JSON."""
         raise
 
 
+def explain_anomalies(anomalies: list[dict]) -> list[dict]:
+    logger.info(f"Explaining {len(anomalies)} anomaly groups")
+    try:
+        prompt = f"""You are a data analyst. Here is a list of statistical anomalies:
+{json.dumps(anomalies, indent=2)}
+
+For each item, add a "business_explanation" key: one sentence on what it might mean in the dataset.
+Do not remove or rename existing keys.
+Return the same JSON array with "business_explanation" added.
+Return ONLY a valid JSON array."""
+        result = safe_parse_json(_call(prompt))
+        if not isinstance(result, list):
+            logger.error("Groq returned non-list object for anomaly explanation")
+            raise ValueError("Groq returned anomaly explanations that were not a JSON array.")
+        logger.info("Anomaly explanation completed")
+        return result
+    except Exception:
+        logger.error("Anomaly explanation failed", exc_info=True)
+        raise
+
+
+def suggest_dashboard_queries(schema: str, sample: str) -> list[dict]:
+    logger.info("Suggesting auto-dashboard queries")
+    try:
+        prompt = f"""You are a DuckDB analytics expert.
+Table name: df
+Schema:
+{schema}
+
+Sample rows:
+{sample}
+
+Suggest exactly 3 DuckDB SELECT queries for an automatic overview dashboard.
+
+Return a JSON array with exactly 3 objects. Each object must have:
+{{
+  "title": "short chart title",
+  "description": "short reason this chart is useful",
+  "sql": "DuckDB SELECT query"
+}}
+
+Rules:
+- Use only columns in the schema
+- Use FROM df
+- Prefer simple visual queries: count by category, top 10 category by numeric total, average numeric by category, or date trend by numeric total
+- Each query should return at least 2 columns when possible
+- Add LIMIT 10 to top category queries
+- Do not use joins, CTEs, subqueries, window functions, inserts, updates, deletes, or DDL
+- Return ONLY valid JSON. No markdown."""
+        result = safe_parse_json(_call(prompt))
+        if not isinstance(result, list):
+            logger.error("Groq returned non-list object for dashboard queries")
+            raise ValueError("Groq returned dashboard queries that were not a JSON array.")
+        logger.info(f"Dashboard query suggestion completed with {len(result)} queries")
+        return result[:3]
+    except Exception:
+        logger.error("Dashboard query suggestion failed", exc_info=True)
+        raise
+
+
 def generate_sql(question: str, schema: str, sample: str) -> str:
     logger.info(f"Generating SQL for question: {question[:100]}")
     try:
