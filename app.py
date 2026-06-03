@@ -22,7 +22,9 @@ if not os.getenv("GROQ_API_KEY"):
         logger.debug("GROQ_API_KEY not found in Streamlit secrets, checking .env")
 
 from agents.chart_agent import ChartAgent
+from agents.anomaly_agent import AnomalyAgent
 from agents.cleaning_agent import CleaningAgent
+from agents.dashboard_agent import DashboardAgent
 from agents.dataset_agent import DatasetAgent
 from agents.insight_agent import InsightAgent
 from agents.query_agent import QueryAgent
@@ -54,6 +56,8 @@ def read_upload(uploaded_file) -> pd.DataFrame:
 def init_agents() -> dict:
     return {
         "cleaning": CleaningAgent(),
+        "anomaly": AnomalyAgent(),
+        "dashboard": DashboardAgent(),
         "dataset": DatasetAgent(),
         "query": QueryAgent(),
         "insight": InsightAgent(),
@@ -67,6 +71,8 @@ if "history" not in st.session_state:
     st.session_state.history = []
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "anomaly_fix_log" not in st.session_state:
+    st.session_state.anomaly_fix_log = []
 
 
 def render_history_sidebar() -> None:
@@ -121,6 +127,48 @@ def render_conversation() -> None:
             )
 
 
+def apply_anomaly_fixes(anomalies: list[dict]) -> None:
+    fixed_df = st.session_state.clean_result["cleaned_df"]
+    messages = []
+    for anomaly in anomalies:
+        fixed_df, message = agents["anomaly"].fix_anomaly(fixed_df, anomaly)
+        messages.append(message)
+
+    st.session_state.clean_result["cleaned_df"] = fixed_df
+    st.session_state.anomaly_fix_log.extend(messages)
+    st.session_state.pop("anomaly_result", None)
+    st.session_state.pop("dataset_result", None)
+    st.session_state.pop("dashboard_result", None)
+    st.session_state.messages = []
+    st.session_state.history = []
+    logger.info(f"Applied {len(anomalies)} anomaly fixes")
+    st.rerun()
+
+
+def build_anomaly_table(anomalies: list[dict]) -> pd.DataFrame:
+    rows = []
+    for index, anomaly in enumerate(anomalies):
+        details = {
+            key: value
+            for key, value in anomaly.items()
+            if key not in {"column", "type", "severity", "business_explanation"}
+        }
+        detail_text = ", ".join(f"{key}: {value}" for key, value in details.items())
+        rows.append(
+            {
+                "Fix": False,
+                "Index": index,
+                "Severity": anomaly.get("severity", "medium").title(),
+                "Column": anomaly.get("column", ""),
+                "Type": anomaly.get("type", "anomaly").replace("_", " ").title(),
+                "Count": anomaly.get("count", ""),
+                "Details": detail_text,
+                "Explanation": anomaly.get("business_explanation", ""),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 st.title("InsightFlow")
 st.caption("Upload a dataset, clean it with AI, ask questions in plain English, and get SQL-backed insights.")
 
@@ -137,6 +185,7 @@ if st.session_state.get("filename") != uploaded.name:
     st.session_state.raw_df = read_upload(uploaded)
     st.session_state.history = []
     st.session_state.messages = []
+    st.session_state.anomaly_fix_log = []
     logger.info(f"Session cleared and initialized for new file")
 
 raw_df = st.session_state.raw_df
@@ -185,6 +234,57 @@ st.download_button(
 )
 
 st.divider()
+st.subheader("Anomaly Detection Agent")
+
+for item in st.session_state.get("anomaly_fix_log", []):
+    st.info(item)
+
+if "anomaly_result" not in st.session_state:
+    logger.info("Running anomaly agent")
+    with st.spinner("Scanning for statistical anomalies..."):
+        try:
+            st.session_state.anomaly_result = agents["anomaly"].run(cleaned_df)
+        except Exception as exc:
+            logger.error("Anomaly agent failed", exc_info=True)
+            st.warning(f"Anomaly scan skipped: {exc}")
+            st.session_state.anomaly_result = {"anomalies": [], "had_anomalies": False}
+
+anomaly_result = st.session_state.anomaly_result
+if anomaly_result["had_anomalies"]:
+    anomalies = anomaly_result["anomalies"]
+    with st.expander(f"{len(anomalies)} anomalies detected", expanded=True):
+        edited_anomalies = st.data_editor(
+            build_anomaly_table(anomalies),
+            hide_index=True,
+            width="stretch",
+            disabled=["Index", "Severity", "Column", "Type", "Count", "Details", "Explanation"],
+            column_config={
+                "Fix": st.column_config.CheckboxColumn("Fix", help="Select anomalies to fix."),
+                "Index": None,
+                "Details": st.column_config.TextColumn("Details", width="medium"),
+                "Explanation": st.column_config.TextColumn("Explanation", width="large"),
+            },
+            key="anomaly_fix_table",
+        )
+
+        selected_rows = edited_anomalies[edited_anomalies["Fix"]]
+        selected_anomalies = [
+            anomalies[int(row["Index"])]
+            for _, row in selected_rows.iterrows()
+        ]
+
+        fix_col, note_col = st.columns([1, 3])
+        with fix_col:
+            if st.button("Fix selected anomalies", width="stretch", disabled=not selected_anomalies):
+                apply_anomaly_fixes(selected_anomalies)
+        with note_col:
+            st.caption(
+                "Numeric anomalies are capped to statistical bounds. Date gaps are reported but not changed automatically."
+            )
+else:
+    st.success("No major statistical anomalies detected.")
+
+st.divider()
 st.subheader("Dataset Overview")
 
 if "dataset_result" not in st.session_state:
@@ -213,6 +313,33 @@ with finding_col:
 
 if dataset["quality_note"]:
     st.info(dataset["quality_note"])
+
+st.divider()
+st.subheader("Auto Dashboard")
+
+if "dashboard_result" not in st.session_state:
+    logger.info("Running dashboard agent")
+    with st.spinner("Building overview dashboard..."):
+        try:
+            st.session_state.dashboard_result = agents["dashboard"].run(cleaned_df)
+        except Exception as exc:
+            logger.error("Dashboard agent failed", exc_info=True)
+            st.warning(f"Auto dashboard skipped: {exc}")
+            st.session_state.dashboard_result = {"widgets": [], "had_widgets": False}
+
+dashboard = st.session_state.dashboard_result
+if dashboard["had_widgets"]:
+    chart_cols = st.columns(len(dashboard["widgets"]))
+    for index, widget in enumerate(dashboard["widgets"]):
+        with chart_cols[index]:
+            st.markdown(f"**{widget['title']}**")
+            if widget.get("description"):
+                st.caption(widget["description"])
+            st.plotly_chart(widget["figure"], width="stretch", key=f"auto_dashboard_chart_{index}")
+            with st.expander("SQL", expanded=False):
+                st.code(widget["sql"], language="sql")
+else:
+    st.info("No automatic dashboard charts were generated for this dataset.")
 
 questions = dataset.get("questions", [])[:5]
 if questions:
