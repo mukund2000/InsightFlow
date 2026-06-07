@@ -54,19 +54,42 @@ SAMPLE_DATASETS = {
 
 def read_upload(uploaded_file) -> pd.DataFrame:
     logger.info(f"Reading uploaded file: {uploaded_file.name}")
+
     try:
         name = uploaded_file.name.lower()
+
+        # ---------------- CSV HANDLING ----------------
         if name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file, low_memory=False)
-            logger.info(f"Loaded CSV: {len(df)} rows, {len(df.columns)} columns")
-            return df
+            encodings = ["utf-8", "cp1252", "latin1", "ISO-8859-1"]
+
+            for enc in encodings:
+                try:
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(uploaded_file, encoding=enc, low_memory=False)
+                    logger.info(f"Loaded CSV using encoding={enc}: {len(df)} rows, {len(df.columns)} cols")
+                    return df
+                except UnicodeDecodeError:
+                    continue
+
+            raise ValueError("Unable to decode CSV with common encodings")
+
+        # ---------------- EXCEL HANDLING ----------------
         if name.endswith((".xlsx", ".xls")):
-            workbook = pd.ExcelFile(BytesIO(uploaded_file.read()))
-            df = pd.read_excel(workbook, sheet_name=workbook.sheet_names[0])
-            logger.info(f"Loaded Excel: {len(df)} rows, {len(df.columns)} columns from sheet '{workbook.sheet_names[0]}'")
+            uploaded_file.seek(0)  # IMPORTANT for Streamlit
+
+            content = BytesIO(uploaded_file.read())
+            workbook = pd.ExcelFile(content)
+
+            sheet = workbook.sheet_names[0]
+            df = pd.read_excel(workbook, sheet_name=sheet)
+
+            logger.info(f"Loaded Excel: {len(df)} rows, {len(df.columns)} columns from sheet '{sheet}'")
             return df
+
+        # ---------------- UNSUPPORTED ----------------
         logger.error(f"Unsupported file type: {name}")
-        raise ValueError("Unsupported file type.")
+        raise ValueError("Unsupported file type. Only CSV and Excel are supported.")
+
     except Exception as exc:
         logger.error(f"Failed to read uploaded file: {uploaded_file.name}", exc_info=True)
         raise
@@ -74,9 +97,18 @@ def read_upload(uploaded_file) -> pd.DataFrame:
 
 def read_sample_dataset(path: Path) -> pd.DataFrame:
     logger.info(f"Reading sample dataset: {path}")
-    df = pd.read_csv(path, low_memory=False)
-    logger.info(f"Loaded sample dataset: {len(df)} rows, {len(df.columns)} columns")
-    return df
+
+    encodings = ["utf-8", "cp1252", "latin1"]
+
+    for enc in encodings:
+        try:
+            df = pd.read_csv(path, encoding=enc, low_memory=False)
+            logger.info(f"Loaded dataset using encoding: {enc}")
+            return df
+        except UnicodeDecodeError:
+            continue
+
+    raise ValueError("Unable to decode CSV file with common encodings")
 
 
 def reset_dataset_state(filename: str, df: pd.DataFrame, clear_upload: bool = False) -> None:
